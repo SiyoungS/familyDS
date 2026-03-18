@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth'
+import { getRedirectResult, onAuthStateChanged, signInWithRedirect, signOut } from 'firebase/auth'
 import { auth, googleProvider, hasFirebaseConfig } from '../lib/firebase.js'
 import { AuthContext } from './auth-context.js'
 
@@ -27,6 +27,13 @@ export const AuthProvider = ({ children }) => {
       setIsAuthReady(true)
       return undefined
     }
+
+    // Redirect 로그인 완료 처리(인증 결과를 수신)
+    getRedirectResult(auth).catch((nextError) => {
+      // Redirect 처리 실패도 UI 에러로 노출
+      setError(formatAuthError(nextError))
+      setIsAuthReady(true)
+    })
 
     const unsubscribe = onAuthStateChanged(
       auth,
@@ -57,8 +64,9 @@ export const AuthProvider = ({ children }) => {
     setIsLoading(true)
 
     try {
-      const result = await signInWithPopup(auth, googleProvider)
-      return result.user
+      // Popup 닫기 관련 COOP 이슈가 있을 수 있어 redirect 방식으로 처리
+      await signInWithRedirect(auth, googleProvider)
+      return null
     } catch (nextError) {
       const message = formatAuthError(nextError)
       setError(message)
