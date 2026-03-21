@@ -1,12 +1,19 @@
 import { useMemo, useRef, useState } from 'react'
 import { useAuth } from '../../hooks/useAuth.js'
+import { generateGenogram } from '../../lib/genogram/generateGenogram.js'
+import GenogramView from '../../components/Genogram/GenogramView.jsx'
 
 const MainPage = () => {
   const { user } = useAuth()
   const fileInputRef = useRef(null)
   const [activeTab, setActiveTab] = useState('가계도')
+  const [counseledPersonName, setCounseledPersonName] = useState('')
+  const [spouseName, setSpouseName] = useState('')
   const [prompt, setPrompt] = useState('')
   const [attachedFileName, setAttachedFileName] = useState('')
+  const [genogram, setGenogram] = useState(null)
+  const [isGenerating, setIsGenerating] = useState(false)
+  const [genogramError, setGenogramError] = useState('')
 
   const displayName = useMemo(() => user?.displayName ?? user?.email?.split('@')?.[0] ?? '사용자', [user])
 
@@ -21,7 +28,28 @@ const MainPage = () => {
 
   const handleSubmit = (event) => {
     event.preventDefault()
-    // TODO: 탭(activeTab) + prompt + file을 실제 기능으로 연결
+    if (activeTab !== '가계도') return
+    if (!prompt.trim()) return
+
+    setIsGenerating(true)
+    setGenogramError('')
+    setGenogram(null)
+
+    generateGenogram({
+      prompt,
+      activeTab,
+      counselorName: counseledPersonName.trim(),
+      spouseName: spouseName.trim(),
+    })
+      .then((next) => {
+        setGenogram(next)
+      })
+      .catch((err) => {
+        setGenogramError(err?.message ?? '가계도 생성에 실패했습니다.')
+      })
+      .finally(() => {
+        setIsGenerating(false)
+      })
   }
 
   return (
@@ -37,15 +65,33 @@ const MainPage = () => {
             </p>
           </div>
 
-          <div className="hidden shrink-0 sm:flex">
-            <div className="grid h-16 w-16 place-items-center rounded-2xl bg-slate-50 text-2xl">
-              🦫
-            </div>
-          </div>
+          <div className="hidden shrink-0 sm:flex" />
         </header>
 
         <form onSubmit={handleSubmit} className="mt-8">
           <div className="rounded-[28px] border border-slate-300 bg-white px-6 py-5 shadow-[0_1px_0_rgba(15,23,42,0.04)]">
+            <div className="mb-3 flex flex-wrap items-center justify-end gap-3 text-sm">
+              <label className="text-slate-600" htmlFor="counseledPersonName">
+                상담자 성함
+              </label>
+              <input
+                id="counseledPersonName"
+                value={counseledPersonName}
+                onChange={(e) => setCounseledPersonName(e.target.value)}
+                placeholder="예: 정성호"
+                className="w-44 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-sky-500"
+              />
+              <label className="ml-2 text-slate-600" htmlFor="spouseName">
+                배우자 성함
+              </label>
+              <input
+                id="spouseName"
+                value={spouseName}
+                onChange={(e) => setSpouseName(e.target.value)}
+                placeholder="예: 김진주"
+                className="w-44 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-sky-500"
+              />
+            </div>
             <textarea
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
@@ -74,12 +120,24 @@ const MainPage = () => {
                   className="grid h-11 w-11 place-items-center rounded-full bg-black text-white transition hover:bg-slate-800"
                   aria-label="전송"
                 >
-                  <span className="text-lg leading-none">↑</span>
+                  {isGenerating ? <span className="text-xs">...</span> : <span className="text-lg leading-none">↑</span>}
                 </button>
               </div>
             </div>
           </div>
         </form>
+
+        {genogramError ? (
+          <div className="mt-6 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+            {genogramError}
+          </div>
+        ) : null}
+
+        {genogram ? (
+          <div className="mt-6">
+            <GenogramView genogram={genogram} />
+          </div>
+        ) : null}
 
         <nav className="mt-8 flex justify-center">
           <div className="flex items-center gap-3 rounded-2xl bg-slate-100 p-2">

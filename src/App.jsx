@@ -14,7 +14,7 @@ function App() {
     } catch {
       // Error state is surfaced by the auth context on the relevant screens.
     }
-  }
+  } 
 
   return (
     <div className="flex min-h-screen flex-col bg-slate-100">
