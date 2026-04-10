@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState } from 'react'
 import { useAuth } from '../../hooks/useAuth.js'
-import { generateGenogram } from '../../lib/genogram/generateGenogram.js'
-import GenogramView from '../../components/Genogram/GenogramView.jsx'
+import { extractGenogram } from '../../lib/genogram/generateGenogram.js'
+import GenogramEventHost, { GENOGRAM_RENDER_EVENT } from '../../components/Genogram/GenogramEventHost.jsx'
 
 const MainPage = () => {
   const { user } = useAuth()
@@ -11,7 +11,7 @@ const MainPage = () => {
   const [spouseName, setSpouseName] = useState('')
   const [prompt, setPrompt] = useState('')
   const [attachedFileName, setAttachedFileName] = useState('')
-  const [genogram, setGenogram] = useState(null)
+  const [extracted, setExtracted] = useState(null)
   const [isGenerating, setIsGenerating] = useState(false)
   const [genogramError, setGenogramError] = useState('')
 
@@ -33,16 +33,17 @@ const MainPage = () => {
 
     setIsGenerating(true)
     setGenogramError('')
-    setGenogram(null)
+    setExtracted(null)
 
-    generateGenogram({
+    extractGenogram({
       prompt,
       activeTab,
       counselorName: counseledPersonName.trim(),
       spouseName: spouseName.trim(),
     })
       .then((next) => {
-        setGenogram(next)
+        setExtracted(next)
+        window.dispatchEvent(new CustomEvent(GENOGRAM_RENDER_EVENT, { detail: { data: next } }))
       })
       .catch((err) => {
         setGenogramError(err?.message ?? '가계도 생성에 실패했습니다.')
@@ -133,9 +134,16 @@ const MainPage = () => {
           </div>
         ) : null}
 
-        {genogram ? (
+        {extracted ? (
           <div className="mt-6">
-            <GenogramView genogram={genogram} />
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+              <div className="mb-2 text-sm font-semibold text-slate-700">AI 추출 결과(JSON)</div>
+              <pre className="max-h-[520px] overflow-auto whitespace-pre-wrap break-words rounded-xl bg-white p-4 text-xs leading-relaxed text-slate-900">
+                {JSON.stringify(extracted, null, 2)}
+              </pre>
+            </div>
+
+            <GenogramEventHost initialData={extracted} />
           </div>
         ) : null}
 

@@ -112,6 +112,14 @@ const GenogramView = ({ genogram }) => {
 
   const getBaseNodeRaw = (id) => {
     const person = peopleById.get(id)
+
+    // Layout engine가 계산한 절대좌표가 있으면 우선 사용합니다.
+    const layoutX = Number(person?.layoutX)
+    const layoutY = Number(person?.layoutY)
+    if (Number.isFinite(layoutX) && Number.isFinite(layoutY)) {
+      return { x: layoutX, y: layoutY }
+    }
+
     const colNum = typeof person?.col === 'number' ? person.col : typeof person?.col === 'string' ? Number(person.col) : NaN
     const rowNum = typeof person?.row === 'number' ? person.row : typeof person?.row === 'string' ? Number(person.row) : NaN
     const col = Number.isFinite(colNum) ? colNum : fallbackColById.get(id) ?? 0
@@ -154,6 +162,9 @@ const GenogramView = ({ genogram }) => {
   // 충돌 방지: 같은 세대/같은 row에 있는 도형이 겹치면 자동으로 옆으로 민다.
   // (AI가 parent/couple을 일부 누락해도 "도형 겹침"만큼은 무조건 막는다)
   const baseXOverrideById = useMemo(() => {
+    const hasExternalLayout = localPeople.some((p) => Number.isFinite(Number(p.layoutX)) && Number.isFinite(Number(p.layoutY)))
+    if (hasExternalLayout) return new Map()
+
     const minGap = nodeW + 76
     const byRow = new Map() // key -> [{id,x}]
     for (const p of localPeople) {
@@ -200,8 +211,13 @@ const GenogramView = ({ genogram }) => {
 
   // 콘텐츠(노드들) 경계 기준으로 viewBox를 잡아 컨테이너에 꽉 차게 보이도록 한다.
   const view = useMemo(() => {
-    const padX = 140
-    const padY = 170
+    const hasExternalLayout = localPeople.some(
+      (p) => Number.isFinite(Number(p.layoutX)) && Number.isFinite(Number(p.layoutY)),
+    )
+    // layout 엔진 기반으로 viewBox 범위가 커지는 케이스가 있어,
+    // 외부 레이아웃이 있을 때는 여백(padding)을 줄여서 전체 크기/폰트가 작아 보이지 않게 합니다.
+    const padX = hasExternalLayout ? 60 : 140
+    const padY = hasExternalLayout ? 80 : 170
     if (!localPeople.length) return { minX: 0, minY: 0, w: width, h: height, viewBox: `0 0 ${width} ${height}` }
 
     let minX = Infinity
@@ -337,6 +353,8 @@ const GenogramView = ({ genogram }) => {
     if (!renderParentChildLinks) continue
     if (!peopleById.has(a) || !peopleById.has(b)) continue
 
+    // layoutX/layoutY 기반의 부부 "결혼선" 중앙에서 자녀 선을 내려보내기 위해,
+    // coupleCenterX는 항상 getMarriageGeom(a,b).centerX를 사용합니다.
     const { centerX: coupleCenterX, marriageY } = getMarriageGeom(a, b)
 
     const children = []
@@ -358,17 +376,10 @@ const GenogramView = ({ genogram }) => {
       const only = children[0]
       const childX = snap(only.x)
       const childTopY = snap(only.y - nodeH / 2)
-      // 자녀가 1명인 경우:
-      // - 중앙 세로선(vc) 같은 "공용 선"은 그리지 않는다. (겹치면 이유 없는 선처럼 보임)
-      // - childX가 중앙과 같으면 수직, 아니면 ㄱ자로만 연결
       paths.push(
         <path
           key={`sv-${a}-${b}-${only.id}`}
-          d={
-            childX === coupleCenterX
-              ? `M ${coupleCenterX} ${marriageY} L ${coupleCenterX} ${childTopY}`
-              : `M ${coupleCenterX} ${marriageY} L ${childX} ${marriageY} L ${childX} ${childTopY}`
-          }
+          d={`M ${coupleCenterX} ${marriageY} V ${marriageY + 40} H ${childX} V ${childTopY}`}
           stroke="#111827"
           strokeWidth={lineStroke}
           strokeLinecap="round"
@@ -382,7 +393,7 @@ const GenogramView = ({ genogram }) => {
       const baseChildTopYs = children.map((c) => getBaseNode(c.id).y - nodeH / 2)
       const minChildTop = Math.min(...baseChildTopYs)
       // marriageY 바로 아래에서 끊겨 보이지 않도록 최소 낙차를 두고, 형제 가로선은 자녀 윤곽 위에 둔다.
-      const minDropPx = 52
+      const minDropPx = 40
       const rawBar = snap(minChildTop - 22)
       const floorY = snap(marriageY + minDropPx)
       const ceilY = snap(minChildTop - 6)
@@ -392,16 +403,13 @@ const GenogramView = ({ genogram }) => {
       }
 
       const childXs = children.map((c) => snap(c.x))
-      const leftX = Math.min(...childXs)
-      const rightX = Math.max(...childXs)
-      // 부모 중심 X가 형제 가로선 구간 밖이면 세로선만으로는 가로선과 만나지 않음 → ㄱ자로 합류
-      const junctionX = snap(Math.min(Math.max(coupleCenterX, leftX), rightX))
+      let leftX = Math.min(...childXs, coupleCenterX)
+      let rightX = Math.max(...childXs, coupleCenterX)
 
-      // 중앙 세로선(부부 결혼선 -> 자녀 연결 기준선) + 형제선까지 수평 합류
       paths.push(
         <path
           key={`vc-${a}-${b}`}
-          d={`M ${coupleCenterX} ${marriageY} L ${coupleCenterX} ${siblingY} L ${junctionX} ${siblingY}`}
+          d={`M ${coupleCenterX} ${marriageY} L ${coupleCenterX} ${siblingY}`}
           stroke="#111827"
           strokeWidth={lineStroke}
           strokeLinecap="round"

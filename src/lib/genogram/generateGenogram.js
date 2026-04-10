@@ -1,3 +1,5 @@
+// NOTE: 레이아웃 엔진은 "추출 전용" 모드에서는 사용하지 않습니다.
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 const extractBirthYear = (text) => {
@@ -72,8 +74,30 @@ const parseCohabitingFromPrompt = (text, counselorName, spouseNameOverride) => {
 }
 
 const applyCohabitingFocusLayout = (result, focus) => {
-  if (!focus) return result
-  if (!result || !Array.isArray(result.people)) return result
+  let activeFocus = focus
+
+  // [핵심] 프롬프트에 focus 키워드가 없어도,
+  // 3세대(level===2) 자녀를 찾아 부모를 역으로 찾아 레이아웃을 강제로 적용합니다.
+  if (!activeFocus && result && Array.isArray(result.people)) {
+    const child = result.people.find((p) => p?.level === 2)
+    if (child && Array.isArray(result.parents)) {
+      const parentIds = result.parents.filter((e) => e?.child === child.id).map((e) => e?.parent).filter(Boolean)
+      if (parentIds.length >= 2) {
+        const p1 = result.people.find((p) => p?.id === parentIds[0])
+        const p2 = result.people.find((p) => p?.id === parentIds[1])
+        if (p1 && p2) {
+          activeFocus = {
+            clientName: p1.gender === 'male' ? p1.name : p2.name,
+            spouseName: p1.gender === 'female' ? p1.name : p2.name,
+            childName: child.name,
+            childGender: child.gender,
+          }
+        }
+      }
+    }
+  }
+
+  if (!activeFocus || !result || !Array.isArray(result.people)) return result
 
   const people = result.people.map((p) => ({ ...p }))
   const couples = Array.isArray(result.couples) ? result.couples.map((c) => ({ ...c })) : []
@@ -116,22 +140,22 @@ const applyCohabitingFocusLayout = (result, focus) => {
   }
 
   const clientId = ensurePerson({
-    name: focus.clientName,
+    name: activeFocus.clientName,
     gender: 'male',
     level: 1,
     col: 2.0,
     row: 1,
   })
   const spouseId = ensurePerson({
-    name: focus.spouseName,
+    name: activeFocus.spouseName,
     gender: 'female',
     level: 1,
     col: 1.2,
     row: 1,
   })
   const childId = ensurePerson({
-    name: focus.childName,
-    gender: focus.childGender,
+    name: activeFocus.childName,
+    gender: activeFocus.childGender,
     level: 2,
     col: 1.6,
     row: 2,
@@ -370,40 +394,30 @@ const applyCohabitingFocusLayout = (result, focus) => {
       .filter((id) => !isLikelyInLawSiblingRow(id))
       .sort((a, b) => bloodRank(a) - bloodRank(b) || byName(a, b))
 
-    const spousesOrdered = []
+    // 1) 혈족을 먼저 넣고, 배우자가 있으면 바로 옆에 붙여서 정렬(Pairing)
+    const pairedOrdered = []
     const seenSp = new Set()
     for (const sid of bloodIds) {
+      pairedOrdered.push(sid)
       const sp = resolveSpouseId(sid)
       if (sp && !seenSp.has(sp)) {
-        spousesOrdered.push(sp)
+        pairedOrdered.push(sp)
         seenSp.add(sp)
       }
     }
-    // 오른쪽 클러스터(배우자 쪽)는 앵커가 부부 연결의 기준이므로,
-    // 혈족(형제) → 앵커 → 배우자(인척) 순으로 끝에 몰아 "배우자가 마지막" 형태를 유지한다.
-    const siblingRowOrdered = side === 'right' ? [...bloodIds, ...spousesOrdered] : [...bloodIds, ...spousesOrdered]
 
-    const rowPlaced = new Set(siblingRowOrdered)
-    for (const id of siblingIds) {
-      if (id === anchorId) continue
-      if (rowPlaced.has(id)) continue
-      siblingRowOrdered.push(id)
-      rowPlaced.add(id)
-    }
-
-    const ordered = (() => {
-      if (side === 'left') return [anchorId, ...siblingRowOrdered]
-      // right: blood -> anchor -> spouses/others (spouses should appear after anchor)
-      const bloodOnly = siblingRowOrdered.filter((id) => !seenSp.has(id))
-      const spousesOnly = siblingRowOrdered.filter((id) => seenSp.has(id))
-      return [...bloodOnly, anchorId, ...spousesOnly]
-    })()
+    // 2) Anchor(상담자/배우자 본인) 위치 결정 (Left는 맨 앞, Right는 맨 뒤)
+    const ordered = side === 'left'
+      ? [anchorId, ...pairedOrdered]
+      : [...pairedOrdered, anchorId]
 
     let cursor = startCol
     let minC = Infinity
     let maxC = -Infinity
 
-    for (const sid of ordered) {
+    // 3) 배우자는 가깝게(SPOUSE_COL_NEAR), 형제는 멀게(SIBLING_COL_STEP) 간격 부여
+    for (let i = 0; i < ordered.length; i += 1) {
+      const sid = ordered[i]
       const s = peopleById.get(sid)
       if (!s) continue
       s.level = 1
@@ -411,7 +425,12 @@ const applyCohabitingFocusLayout = (result, focus) => {
       s.col = cursor
       minC = Math.min(minC, s.col)
       maxC = Math.max(maxC, s.col)
-      cursor += SIBLING_COL_STEP
+      const nextId = ordered[i + 1]
+      if (nextId && hasSecondaryCouple(sid, nextId)) {
+        cursor += SPOUSE_COL_NEAR
+      } else {
+        cursor += SIBLING_COL_STEP
+      }
     }
 
     const midCol = minC !== Infinity && maxC !== -Infinity ? (minC + maxC) / 2 : startCol
@@ -483,6 +502,23 @@ const applyCohabitingFocusLayout = (result, focus) => {
     }
   }
 
+  // 3세대 자녀가 부모 부부선의 정확한 중앙(centerX)에서 시작하도록 값 주입
+  for (const child of people) {
+    if (child.level === 2) {
+      const myParents = parents.filter((e) => e.child === child.id).map((e) => e.parent)
+      if (myParents.length === 2) {
+        const p1 = peopleById.get(myParents[0])
+        const p2 = peopleById.get(myParents[1])
+        if (p1 && p2 && p1.col != null && p2.col != null) {
+          child.parentCenterX = (p1.col + p2.col) / 2
+        }
+      } else if (myParents.length === 1) {
+        const p1 = peopleById.get(myParents[0])
+        if (p1 && p1.col != null) child.parentCenterX = p1.col
+      }
+    }
+  }
+
   return {
     ...result,
     people,
@@ -507,6 +543,55 @@ const tryRegexExtract = (prompt) => {
       people.push({ id, name, gender, birthYear, level, col, row })
     }
     return id
+  }
+
+  // --- Simple Korean role pattern (년생 없이도 지원) ---
+  // 예: "아빠 성광제 엄마 임해정 본인 성시영 아내 안선영 아들 성호랑"
+  // -> (부모 부부) -> 본인(자녀) -> 본인 부부 -> 자녀
+  const trimName = (s) => (s ?? '').trim()
+  const rxName = '([가-힣A-Za-z]+)'
+  const mDad = prompt.match(new RegExp(`아빠\\s*${rxName}`))
+  const mMom = prompt.match(new RegExp(`엄마\\s*${rxName}`))
+  const mSelf = prompt.match(new RegExp(`본인\\s*${rxName}`))
+  const mWife = prompt.match(new RegExp(`아내\\s*${rxName}`))
+  const mHusband = prompt.match(new RegExp(`남편\\s*${rxName}`))
+  const mSon = prompt.match(new RegExp(`아들\\s*${rxName}`))
+  const mDaughter = prompt.match(new RegExp(`딸\\s*${rxName}`))
+
+  const dadName0 = trimName(mDad?.[1])
+  const momName0 = trimName(mMom?.[1])
+  const selfName0 = trimName(mSelf?.[1])
+  const spouseName0 = trimName(mWife?.[1] || mHusband?.[1])
+  const kidName0 = trimName(mSon?.[1] || mDaughter?.[1])
+
+  if (dadName0 && momName0 && selfName0) {
+    const levelGP = 0
+    const levelParents = 1
+    const levelKids = 2
+
+    const dadId = addPerson({ name: dadName0, gender: 'male', level: levelParents, col: 0.9, row: 0 })
+    const momId = addPerson({ name: momName0, gender: 'female', level: levelParents, col: 1.5, row: 0 })
+    couples.push({ a: dadId, b: momId })
+
+    const selfGender = 'male' // 본인 성별은 데이터가 없으면 기본 남성으로 둠(필요시 UI에서 수정)
+    const selfId = addPerson({ name: selfName0, gender: selfGender, level: levelKids, col: 1.2, row: 1 })
+    parents.push({ parent: dadId, child: selfId })
+    parents.push({ parent: momId, child: selfId })
+
+    if (spouseName0) {
+      const spouseGender = mWife ? 'female' : 'female' // 정보가 없으면 여성으로 두고, UI에서 수정 가능
+      const spId = addPerson({ name: spouseName0, gender: spouseGender, level: levelKids, col: 1.8, row: 1 })
+      couples.push({ a: selfId, b: spId })
+
+      if (kidName0) {
+        const kidGender = mSon ? 'male' : mDaughter ? 'female' : 'unknown'
+        const kidId = addPerson({ name: kidName0, gender: kidGender, level: levelKids + 1, col: 1.5, row: 2 })
+        parents.push({ parent: selfId, child: kidId })
+        parents.push({ parent: spId, child: kidId })
+      }
+    }
+
+    return { people, couples, parents, source: 'regex-simple' }
   }
 
   const motherMatch = prompt.match(/엄마\s+([가-힣A-Za-z]+)\s+(\d{1,4})\s*년생/)
@@ -716,21 +801,21 @@ const generateWithOpenAI = async ({ prompt, activeTab, counselorName }) => {
   }
 }
 
-export const generateGenogram = async ({ prompt, activeTab, counselorName, spouseName }) => {
-  // UX: 생성 직후 바로 그릴 수 있도록 약간의 delay 없이도 동작하지만,
-  // 디버깅 편의를 위해 아주 작은 텀을 둠.
-  await sleep(50)
+// ✅ 추출 전용: 텍스트 -> 관계(JSON)까지만. (좌표/레이아웃/렌더 트리거 없음)
+export const extractGenogram = async ({ prompt, activeTab, counselorName, spouseName }) => {
+  await sleep(20)
   if (activeTab !== '가계도') {
-    throw new Error('현재는 "가계도" 탭만 생성할 수 있습니다.')
+    throw new Error('현재는 "가계도" 탭만 지원합니다.')
   }
+
   const consultationDate = parseConsultationDate(prompt)
   const focus = parseCohabitingFromPrompt(prompt, counselorName, spouseName)
   const result = await generateWithOpenAI({ prompt, activeTab, counselorName })
-  const patched = applyCohabitingFocusLayout(result, focus)
+
   return {
-    ...patched,
+    ...result,
     meta: {
-      ...(patched?.meta ?? {}),
+      ...(result?.meta ?? {}),
       consultationDate,
       counselorName: counselorName?.trim() ?? '',
       spouseName: spouseName?.trim() ?? '',
@@ -740,4 +825,7 @@ export const generateGenogram = async ({ prompt, activeTab, counselorName, spous
     },
   }
 }
+
+// (호환) 기존 이름을 쓰던 곳이 있으면 추출로만 동작하게 둡니다.
+export const generateGenogram = extractGenogram
 
