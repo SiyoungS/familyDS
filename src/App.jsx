@@ -1,4 +1,4 @@
-import { NavLink, Route, Routes } from 'react-router-dom'
+import { NavLink, Route, Routes, useLocation } from 'react-router-dom'
 import MainPage from './pages/Main/Main.jsx'
 import AboutPage from './pages/About/About.jsx'
 import LoginPage from './pages/Login/Login.jsx'
@@ -7,6 +7,8 @@ import ProtectedRoute from './components/ProtectedRoute.jsx'
 
 function App() {
   const { user, isLoading, isAuthenticated, logout } = useAuth()
+  const location = useLocation()
+  const isMain = location?.pathname === '/'
 
   const handleLogout = async () => {
     try {
@@ -92,7 +94,7 @@ function App() {
       </header>
 
       <main className="flex flex-1 justify-center p-4">
-        <div className="flex w-full max-w-5xl">
+        <div className={['flex w-full', isMain ? 'max-w-none' : 'max-w-5xl'].join(' ')}>
           <Routes>
             <Route
               path="/"

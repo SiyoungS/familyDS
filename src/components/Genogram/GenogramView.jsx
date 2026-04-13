@@ -17,7 +17,8 @@ const genderToStyle = (gender) => {
   }
 }
 
-const GenogramView = ({ genogram }) => {
+const GenogramView = (props) => {
+  const genogram = props?.genogram ?? props?.data
   const [localPeople, setLocalPeople] = useState(() => genogram?.people ?? [])
   const [nodePositions, setNodePositions] = useState({})
   const [editMode, setEditMode] = useState(true)

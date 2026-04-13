@@ -565,8 +565,9 @@ const tryRegexExtract = (prompt) => {
   const kidName0 = trimName(mSon?.[1] || mDaughter?.[1])
 
   if (dadName0 && momName0 && selfName0) {
-    const levelGP = 0
-    const levelParents = 1
+    // 본인 기준: 부모(0) -> 본인/배우자(1) -> 자녀(2)
+    const levelParents = 0
+    const levelSelf = 1
     const levelKids = 2
 
     const dadId = addPerson({ name: dadName0, gender: 'male', level: levelParents, col: 0.9, row: 0 })
@@ -574,18 +575,18 @@ const tryRegexExtract = (prompt) => {
     couples.push({ a: dadId, b: momId })
 
     const selfGender = 'male' // 본인 성별은 데이터가 없으면 기본 남성으로 둠(필요시 UI에서 수정)
-    const selfId = addPerson({ name: selfName0, gender: selfGender, level: levelKids, col: 1.2, row: 1 })
+    const selfId = addPerson({ name: selfName0, gender: selfGender, level: levelSelf, col: 1.2, row: 1 })
     parents.push({ parent: dadId, child: selfId })
     parents.push({ parent: momId, child: selfId })
 
     if (spouseName0) {
       const spouseGender = mWife ? 'female' : 'female' // 정보가 없으면 여성으로 두고, UI에서 수정 가능
-      const spId = addPerson({ name: spouseName0, gender: spouseGender, level: levelKids, col: 1.8, row: 1 })
+      const spId = addPerson({ name: spouseName0, gender: spouseGender, level: levelSelf, col: 1.8, row: 1 })
       couples.push({ a: selfId, b: spId })
 
       if (kidName0) {
         const kidGender = mSon ? 'male' : mDaughter ? 'female' : 'unknown'
-        const kidId = addPerson({ name: kidName0, gender: kidGender, level: levelKids + 1, col: 1.5, row: 2 })
+        const kidId = addPerson({ name: kidName0, gender: kidGender, level: levelKids, col: 1.5, row: 2 })
         parents.push({ parent: selfId, child: kidId })
         parents.push({ parent: spId, child: kidId })
       }
@@ -618,63 +619,63 @@ const tryRegexExtract = (prompt) => {
 
   const hasParentsAlive = /부모님이\s*살아/.test(prompt) || /부모님.*살아/.test(prompt)
 
-  // generation(세대): 0 조부모, 1 부모/형제, 2 자녀
-  const levelGP = 0
-  const levelParents = 1
+  // generation(세대): 0 (부모/형제), 1 (본인/배우자), 2 (자녀)
+  // [중요] "텍스트에 등장하지 않은 인물"을 임의로 생성하지 않습니다.
+  const levelParents = 0
+  const levelSelf = 1
   const levelKids = 2
 
-  // 좌표는 genogram 모양을 위해 예문 기준으로 "좌/우 가지"를 나눕니다.
-  // - maternal branch: col 0.0 ~ 1.6
-  // - paternal branch: col 2.2 ~ 4.0
-  // - root couple / child: 중앙
-  const matGrandmaId = addPerson({ name: '김진주의 조모(이름 미상)', gender: 'female', level: levelGP, col: 0.6, row: 0 })
-  const matGrandpaId = addPerson({ name: '김진주의 조부(이름 미상)', gender: 'male', level: levelGP, col: 1.2, row: 0 })
-  couples.push({ a: matGrandmaId, b: matGrandpaId })
-
-  const patGrandmaId = addPerson({ name: '정성호의 조모(이름 미상)', gender: 'female', level: levelGP, col: 2.8, row: 0 })
-  const patGrandpaId = addPerson({ name: '정성호의 조부(이름 미상)', gender: 'male', level: levelGP, col: 3.4, row: 0 })
-  couples.push({ a: patGrandmaId, b: patGrandpaId })
-
   const sisterId = /언니/.test(prompt)
-    ? addPerson({ name: '언니(이름 미상)', gender: 'female', level: levelParents, col: 0.8, row: 1 })
+    ? addPerson({ name: '언니(이름 미상)', gender: 'female', level: levelParents, col: 0.8, row: 0 })
     : null
 
-  const motherId = addPerson({ name: motherName, gender: 'female', birthYear: motherYear, level: levelParents, col: 1.5, row: 1 })
+  const motherId = addPerson({ name: motherName, gender: 'female', birthYear: motherYear, level: levelParents, col: 1.5, row: 0 })
 
   const youngerBrotherId = /남동생/.test(prompt)
-    ? addPerson({ name: '남동생(이름 미상)', gender: 'male', level: levelParents, col: 1.0, row: 1 })
+    ? addPerson({ name: '남동생(이름 미상)', gender: 'male', level: levelParents, col: 1.0, row: 0 })
     : null
 
-  if (hasParentsAlive) {
+  const olderBrotherId = /형/.test(prompt)
+    ? addPerson({ name: '형(이름 미상)', gender: 'male', level: levelParents, col: 2.9, row: 0 })
+    : null
+  const fatherId = addPerson({ name: fatherName, gender: 'male', birthYear: fatherYear, level: levelParents, col: 2.2, row: 0 })
+
+  const ensureUnknownParentsOf = (childName, baseCol) => {
+    const dadId = addPerson({ name: `${childName}의 부(미상)`, gender: 'male', level: 0, col: baseCol + 0.3, row: 0 })
+    const momId = addPerson({ name: `${childName}의 모(미상)`, gender: 'female', level: 0, col: baseCol, row: 0 })
+    couples.push({ a: momId, b: dadId })
+    return { dadId, momId }
+  }
+
+  const needsUnknownParents = hasParentsAlive || /(부모님|형제|남매|언니|누나|오빠|형|동생|남동생|여동생)/.test(prompt)
+
+  // 외가(엄마 쪽) 형제 묶음이 필요하면 0세대 부모(미상) 생성 + 연결
+  if (needsUnknownParents && (sisterId || youngerBrotherId)) {
+    const { dadId: mdad, momId: mmom } = ensureUnknownParentsOf(motherName, 0.6)
+    parents.push({ parent: mdad, child: motherId })
+    parents.push({ parent: mmom, child: motherId })
     if (sisterId) {
-      parents.push({ parent: matGrandmaId, child: sisterId })
-      parents.push({ parent: matGrandpaId, child: sisterId })
+      parents.push({ parent: mdad, child: sisterId })
+      parents.push({ parent: mmom, child: sisterId })
     }
-    parents.push({ parent: matGrandmaId, child: motherId })
-    parents.push({ parent: matGrandpaId, child: motherId })
     if (youngerBrotherId) {
-      parents.push({ parent: matGrandmaId, child: youngerBrotherId })
-      parents.push({ parent: matGrandpaId, child: youngerBrotherId })
+      parents.push({ parent: mdad, child: youngerBrotherId })
+      parents.push({ parent: mmom, child: youngerBrotherId })
     }
   }
 
-  const olderBrotherId = /형/.test(prompt)
-    ? addPerson({ name: '형(이름 미상)', gender: 'male', level: levelParents, col: 2.9, row: 1 })
-    : null
-  const fatherId = addPerson({ name: fatherName, gender: 'male', birthYear: fatherYear, level: levelParents, col: 2.2, row: 1 })
-
-  if (hasParentsAlive) {
-    if (olderBrotherId) {
-      parents.push({ parent: patGrandmaId, child: olderBrotherId })
-      parents.push({ parent: patGrandpaId, child: olderBrotherId })
-    }
-    parents.push({ parent: patGrandmaId, child: fatherId })
-    parents.push({ parent: patGrandpaId, child: fatherId })
+  // 친가(아빠 쪽) 형제 묶음이 필요하면 0세대 부모(미상) 생성 + 연결
+  if (needsUnknownParents && olderBrotherId) {
+    const { dadId: fdad, momId: fmom } = ensureUnknownParentsOf(fatherName, 2.8)
+    parents.push({ parent: fdad, child: fatherId })
+    parents.push({ parent: fmom, child: fatherId })
+    parents.push({ parent: fdad, child: olderBrotherId })
+    parents.push({ parent: fmom, child: olderBrotherId })
   }
 
   // root couple + child
   couples.push({ a: motherId, b: fatherId })
-  const daughterId = addPerson({ name: daughterName, gender: 'female', birthYear: daughterYear, level: levelKids, col: 1.9, row: 3 })
+  const daughterId = addPerson({ name: daughterName, gender: 'female', birthYear: daughterYear, level: levelKids, col: 1.9, row: 2 })
   parents.push({ parent: motherId, child: daughterId })
   parents.push({ parent: fatherId, child: daughterId })
 
@@ -686,7 +687,7 @@ const tryRegexExtract = (prompt) => {
         gender: 'male',
         level: levelParents,
         col: 1.1,
-        row: 1,
+        row: 0,
       })
       couples.push({ a: sisterId, b: sisterSpouseId })
 
@@ -696,7 +697,7 @@ const tryRegexExtract = (prompt) => {
           gender: 'male',
           level: levelKids,
           col: 1.2,
-          row: 3,
+          row: 2,
         })
         parents.push({ parent: sisterId, child: boyChildId })
         parents.push({ parent: sisterSpouseId, child: boyChildId })
@@ -711,7 +712,7 @@ const tryRegexExtract = (prompt) => {
       gender: 'female',
       level: levelParents,
       col: 3.2,
-      row: 1,
+      row: 0,
     })
     couples.push({ a: olderBrotherId, b: brotherSpouseId })
 
@@ -721,7 +722,7 @@ const tryRegexExtract = (prompt) => {
         gender: 'unknown',
         level: levelKids,
         col: 2.6,
-        row: 3,
+        row: 2,
       })
       parents.push({ parent: olderBrotherId, child: pregChildId })
       parents.push({ parent: brotherSpouseId, child: pregChildId })
@@ -731,7 +732,7 @@ const tryRegexExtract = (prompt) => {
         gender: 'unknown',
         level: levelKids,
         col: 2.6,
-        row: 3,
+        row: 2,
       })
       parents.push({ parent: olderBrotherId, child: childId })
       parents.push({ parent: brotherSpouseId, child: childId })
@@ -752,6 +753,10 @@ const tryRegexExtract = (prompt) => {
 }
 
 const generateWithOpenAI = async ({ prompt, activeTab, counselorName }) => {
+  // 개발 편의용 regex fallback은 기본적으로 끕니다.
+  // (LLM 누락/실패를 regex가 "조용히" 가려서 데이터가 일부만 저장되는 문제를 방지)
+  const allowRegexFallback =
+    (typeof import.meta !== 'undefined' && import.meta?.env?.VITE_ALLOW_REGEX_FALLBACK === 'true') || false
   try {
     const res = await fetch('/api/genogram', {
       method: 'POST',
@@ -762,7 +767,9 @@ const generateWithOpenAI = async ({ prompt, activeTab, counselorName }) => {
     })
 
     if (!res.ok) {
-      return tryRegexExtract(prompt)
+      const text = await res.text().catch(() => '')
+      if (allowRegexFallback) return tryRegexExtract(prompt)
+      throw new Error(text || `AI API error (${res.status})`)
     }
 
     const json = await res.json()
@@ -795,9 +802,13 @@ const generateWithOpenAI = async ({ prompt, activeTab, counselorName }) => {
         birthYear: toFiniteNumberOr(p?.birthYear, null),
       }
     })
+    json.source = json.source ?? 'openai'
     return json
-  } catch {
-    return tryRegexExtract(prompt)
+  } catch (e) {
+    if (allowRegexFallback) return tryRegexExtract(prompt)
+    // 상위(UI)에서 실제 원인을 볼 수 있게 메시지를 보존합니다.
+    if (e instanceof Error) throw e
+    throw new Error('AI API 호출에 실패했습니다.')
   }
 }
 

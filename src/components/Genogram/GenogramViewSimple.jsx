@@ -1,269 +1,427 @@
 import React, { useMemo } from 'react'
 
-// 가계도 렌더링을 위한 개선된 설정값 (세대 앵커링 + 충돌 방지 + 버스라인)
 const CONFIG = {
-  NODE_SIZE: 44, // 도형 크기 조금 더 키움 (시인성 확보)
-  X_SPACING: 250, // AI의 col 값에 곱할 넓은 가로 간격
-  Y_SPACING: 200, // 세대(Level) 간 넓은 세로 간격
-  MIN_GAP: 150, // 인물 간 절대 겹치지 않게 하는 최소 간격
-  SPOUSE_GAP: 140, // 부부 사이 간격을 넓혀서 텍스트 공간 확보
-  OFFSET_X: 100,
-  OFFSET_Y: 100,
+  NODE_SIZE: 48,
+  X_SPACING: 260,
+  Y_SPACING: 200,
+  MIN_GAP: 180,
+  SPOUSE_GAP: 140,
 }
 
-const buildFallbackColByLevel = (people) => {
-  const byLevel = new Map()
+const computeCenterOutLayout = ({ people, couples, parents }) => {
+  const nodeMap = {}
   for (const p of people) {
-    const lv = typeof p?.level === 'number' ? p.level : Number(p?.level ?? 0)
-    const level = Number.isFinite(lv) ? lv : 0
-    if (!byLevel.has(level)) byLevel.set(level, [])
-    byLevel.get(level).push(p)
+    if (!p?.id) continue
+    nodeMap[p.id] = { ...p, level: Number(p.level) || 0 }
   }
 
-  // 같은 레벨 내부는 안정적으로 정렬(이름, id)
-  for (const [level, arr] of byLevel.entries()) {
-    arr.sort((a, b) => {
-      const an = a?.name ?? ''
-      const bn = b?.name ?? ''
-      const nc = an.localeCompare(bn)
-      if (nc !== 0) return nc
-      return String(a?.id ?? '').localeCompare(String(b?.id ?? ''))
-    })
-    byLevel.set(level, arr)
-  }
-
-  const colById = {}
-  for (const [level, arr] of byLevel.entries()) {
-    for (let i = 0; i < arr.length; i += 1) {
-      const id = arr[i]?.id
-      if (!id) continue
-      colById[id] = i
+  // 위계 보정: parent.level < child.level
+  for (let i = 0; i < 6; i += 1) {
+    for (const e of parents) {
+      const par = nodeMap[e?.parent]
+      const ch = nodeMap[e?.child]
+      if (!par || !ch) continue
+      if (par.level >= ch.level) par.level = ch.level - 1
     }
   }
-  return colById
+  const rawLevels = Object.values(nodeMap).map((n) => n.level)
+  const minLevel = rawLevels.length ? Math.min(...rawLevels) : 0
+  for (const n of Object.values(nodeMap)) n.level -= minLevel
+
+  // level 압축 (y spacing 고정)
+  const usedLevels = Array.from(new Set(Object.values(nodeMap).map((n) => n.level))).sort((a, b) => a - b)
+  const displayLevel = new Map()
+  usedLevels.forEach((lv, idx) => displayLevel.set(lv, idx))
+
+  const peopleById = new Map(Object.values(nodeMap).map((p) => [p.id, p]))
+
+  const parentsByChild = new Map()
+  for (const e of parents) {
+    const parentId = e?.parent
+    const childId = e?.child
+    if (!parentId || !childId) continue
+    if (!parentsByChild.has(childId)) parentsByChild.set(childId, new Set())
+    parentsByChild.get(childId).add(parentId)
+  }
+
+  const coupleKey = (a, b) => [a, b].sort().join('|')
+  const couplesByKey = new Map()
+  for (const c of couples) {
+    if (!c?.a || !c?.b) continue
+    couplesByKey.set(coupleKey(c.a, c.b), { a: c.a, b: c.b })
+  }
+
+  const normalizeCouple = (a, b) => {
+    const pA = peopleById.get(a)
+    const pB = peopleById.get(b)
+    if (!pA || !pB) return null
+    // 대원칙: male 왼쪽, female 오른쪽
+    if (pA.gender === 'male' && pB.gender === 'female') return { leftId: a, rightId: b }
+    if (pA.gender === 'female' && pB.gender === 'male') return { leftId: b, rightId: a }
+    // unknown 포함 시 male 우선
+    if (pA.gender === 'male') return { leftId: a, rightId: b }
+    if (pB.gender === 'male') return { leftId: b, rightId: a }
+    // fallback: id 정렬
+    return a < b ? { leftId: a, rightId: b } : { leftId: b, rightId: a }
+  }
+
+  // ---- unit graph (couple/individual) ----
+  const unitByPerson = new Map() // personId -> unitId
+  const units = new Map() // unitId -> unit
+  const snap = (n) => {
+    const v = Number(n)
+    return Number.isFinite(v) ? Math.round(v) : 0
+  }
+
+  const ensureCoupleUnit = (a, b) => {
+    const key = coupleKey(a, b)
+    const id = `c:${key}`
+    if (units.has(id)) return id
+    const norm = normalizeCouple(a, b)
+    if (!norm) return null
+    const left = peopleById.get(norm.leftId)
+    const right = peopleById.get(norm.rightId)
+    if (!left || !right) return null
+    const level = Math.max(left.level, right.level)
+    left.level = level
+    right.level = level
+    const u = { id, type: 'couple', leftId: norm.leftId, rightId: norm.rightId, level, children: [], midX: 0, gapPx: CONFIG.SPOUSE_GAP }
+    units.set(id, u)
+    unitByPerson.set(norm.leftId, id)
+    unitByPerson.set(norm.rightId, id)
+    return id
+  }
+
+  // create couple units
+  for (const c of couples) {
+    if (!c?.a || !c?.b) continue
+    ensureCoupleUnit(c.a, c.b)
+  }
+  // create individual units
+  for (const p of peopleById.values()) {
+    if (!p?.id) continue
+    if (unitByPerson.has(p.id)) continue
+    const id = `p:${p.id}`
+    units.set(id, { id, type: 'person', personId: p.id, level: p.level, children: [], midX: 0 })
+    unitByPerson.set(p.id, id)
+  }
+
+  const parentUnitOfChild = new Map() // childUnitId -> parentUnitId
+  for (const [childId, pset] of parentsByChild.entries()) {
+    const childUnitId = unitByPerson.get(childId)
+    if (!childUnitId) continue
+    const parr = Array.from(pset)
+    let parentUnitId = null
+    if (parr.length >= 2) {
+      const key = coupleKey(parr[0], parr[1])
+      const cup = couplesByKey.get(key)
+      if (cup) parentUnitId = ensureCoupleUnit(cup.a, cup.b)
+    }
+    if (!parentUnitId && parr.length >= 1) parentUnitId = unitByPerson.get(parr[0]) ?? null
+    if (!parentUnitId) continue
+    parentUnitOfChild.set(childUnitId, parentUnitId)
+  }
+  for (const [childU, parentU] of parentUnitOfChild.entries()) {
+    const pu = units.get(parentU)
+    if (!pu) continue
+    pu.children.push(childU)
+  }
+
+  // subtree width (bottom-up)
+  const SUB_GAP = CONFIG.MIN_GAP
+  const OUTER_GAP = 200
+  const memoW = new Map()
+  const unitWidth = (uid) => {
+    const u = units.get(uid)
+    if (!u) return CONFIG.NODE_SIZE
+    if (u.type === 'couple') return Math.max(u.gapPx, CONFIG.NODE_SIZE)
+    return CONFIG.NODE_SIZE
+  }
+  const widthOf = (uid) => {
+    if (memoW.has(uid)) return memoW.get(uid)
+    const u = units.get(uid)
+    if (!u) return CONFIG.NODE_SIZE
+    const own = unitWidth(uid)
+    if (!u.children?.length) {
+      memoW.set(uid, own)
+      return own
+    }
+    let sum = 0
+    for (let i = 0; i < u.children.length; i += 1) {
+      sum += widthOf(u.children[i])
+      if (i < u.children.length - 1) sum += SUB_GAP
+    }
+    const w = Math.max(own, sum)
+    memoW.set(uid, w)
+    return w
+  }
+
+  const visited = new Set()
+  const placeDescendantsSymmetric = (uid, centerX, opts = {}) => {
+    const u = units.get(uid)
+    if (!u) return
+    const force = Boolean(opts.force)
+    if (!force && visited.has(uid)) return
+    visited.add(uid)
+
+    u.midX = snap(centerX)
+    const y = (displayLevel.get(u.level) ?? 0) * CONFIG.Y_SPACING
+    if (u.type === 'couple') {
+      const left = peopleById.get(u.leftId)
+      const right = peopleById.get(u.rightId)
+      if (left) {
+        left.x = snap(u.midX - u.gapPx / 2)
+        left.y = y
+      }
+      if (right) {
+        right.x = snap(u.midX + u.gapPx / 2)
+        right.y = y
+      }
+    } else {
+      const p = peopleById.get(u.personId)
+      if (p) {
+        p.x = u.midX
+        p.y = y
+      }
+    }
+
+    const kids = Array.isArray(u.children) ? u.children.slice() : []
+    if (!kids.length) return
+    // stable order by original col hint then name
+    kids.sort((a, b) => {
+      const ua = units.get(a)
+      const ub = units.get(b)
+      const pa = ua?.type === 'couple' ? peopleById.get(ua.leftId) : peopleById.get(ua?.personId)
+      const pb = ub?.type === 'couple' ? peopleById.get(ub.leftId) : peopleById.get(ub?.personId)
+      const ca = typeof pa?.col === 'number' ? pa.col : 0
+      const cb = typeof pb?.col === 'number' ? pb.col : 0
+      if (ca !== cb) return ca - cb
+      return String(pa?.name ?? '').localeCompare(String(pb?.name ?? ''))
+    })
+
+    const widths = kids.map(widthOf)
+    const total = widths.reduce((acc, w) => acc + w, 0) + (kids.length > 1 ? SUB_GAP * (kids.length - 1) : 0)
+    let cursor = u.midX - total / 2
+    for (let i = 0; i < kids.length; i += 1) {
+      const kid = kids[i]
+      const w = widths[i]
+      const c = cursor + w / 2
+      placeDescendantsSymmetric(kid, c, opts)
+      cursor += w + SUB_GAP
+    }
+  }
+
+  // -------- Center-Out 5-step --------
+  // 1) 메인 커플 찾기: children(직계) 수가 가장 많은 커플
+  const coupleUnits = Array.from(units.values()).filter((u) => u.type === 'couple')
+  const descMemo = new Map()
+  const descCount = (uid) => {
+    if (descMemo.has(uid)) return descMemo.get(uid)
+    const u = units.get(uid)
+    if (!u) return 0
+    let cnt = (u.children?.length || 0)
+    for (const c of u.children || []) cnt += descCount(c)
+    descMemo.set(uid, cnt)
+    return cnt
+  }
+  // root는 "자손이 많은 커플"이되, 중간세대에 가까운 커플을 우선
+  const levelVals = coupleUnits.map((u) => u.level).sort((a, b) => a - b)
+  const medianLevel = levelVals.length ? levelVals[Math.floor(levelVals.length / 2)] : 0
+  coupleUnits.sort((a, b) => {
+    const da = descCount(a.id)
+    const db = descCount(b.id)
+    if (db !== da) return db - da
+    return Math.abs(a.level - medianLevel) - Math.abs(b.level - medianLevel)
+  })
+  const root = coupleUnits[0] ?? null
+  if (root) {
+    // Root hard fix
+    // 2) 1세대(메인 부부) 좌표 픽스: 남 -100 / 여 +100
+    root.gapPx = Math.max(CONFIG.SPOUSE_GAP, 200)
+    placeDescendantsSymmetric(root.id, 0, { force: true })
+
+    const husbandId = root.leftId
+    const wifeId = root.rightId
+    const husband = peopleById.get(husbandId)
+    const wife = peopleById.get(wifeId)
+
+    // 2) 상향식 조부모 앵커링: 배우자 X축에 부모 커플 중심을 강제 일치
+    const parentCoupleUnitOf = (childId) => {
+      const pset = parentsByChild.get(childId)
+      if (!pset || pset.size < 2) return null
+      const parr = Array.from(pset)
+      const key = coupleKey(parr[0], parr[1])
+      const cup = couplesByKey.get(key)
+      if (!cup) return null
+      return ensureCoupleUnit(cup.a, cup.b)
+    }
+
+    const husbandGp = parentCoupleUnitOf(husbandId)
+    const wifeGp = parentCoupleUnitOf(wifeId)
+
+    if (husbandGp && husband && typeof husband.x === 'number') {
+      placeDescendantsSymmetric(husbandGp, husband.x, { force: true })
+    }
+    if (wifeGp && wife && typeof wife.x === 'number') {
+      placeDescendantsSymmetric(wifeGp, wife.x, { force: true })
+    }
+
+    // 4) 형제자매 방향 강제: 남편 형제는 남편 왼쪽, 아내 형제는 아내 오른쪽
+    const pushSiblingsOutward = (spouseId, side) => {
+      const gp = parentCoupleUnitOf(spouseId)
+      if (!gp) return
+      const gpUnit = units.get(gp)
+      if (!gpUnit) return
+      const spouseUnitId = unitByPerson.get(spouseId)
+      if (!spouseUnitId) return
+      const spouseU = units.get(spouseUnitId)
+      if (!spouseU) return
+      const spouseX = spouseU.midX
+
+      const sibs = (gpUnit.children || []).filter((cid) => cid !== spouseUnitId)
+      if (!sibs.length) return
+
+      // subtree 폭 기반으로 외곽으로 밀기
+      const widths = sibs.map(widthOf)
+      const total = widths.reduce((a, b) => a + b, 0) + (sibs.length > 1 ? SUB_GAP * (sibs.length - 1) : 0)
+      let cursor = side === 'left' ? spouseX - OUTER_GAP - total : spouseX + OUTER_GAP
+
+      for (let i = 0; i < sibs.length; i += 1) {
+        const sib = sibs[i]
+        const w = widths[i]
+        const c = cursor + w / 2
+        placeDescendantsSymmetric(sib, c, { force: true })
+        cursor += w + SUB_GAP
+      }
+    }
+
+    pushSiblingsOutward(husbandId, 'left')
+    pushSiblingsOutward(wifeId, 'right')
+  } else {
+    // 커플이 없는 데이터는 기존처럼 컴포넌트별로 좌->우 배치
+    const childUnits = new Set(parentUnitOfChild.keys())
+    const roots = Array.from(units.keys()).filter((uid) => !childUnits.has(uid))
+    let x = 0
+    for (const uid of roots) {
+      const w = widthOf(uid)
+      placeDescendantsSymmetric(uid, x + w / 2, { force: true })
+      x += w + OUTER_GAP
+    }
+  }
+
+  // 1) 노드 누락 100% 방지: 아직 배치되지 않은 유닛/인물을 화면 가장자리 랙에라도 배치
+  const placedPersonIds = new Set()
+  for (const p of peopleById.values()) {
+    if (typeof p.x === 'number' && typeof p.y === 'number') placedPersonIds.add(p.id)
+  }
+  const unplaced = Array.from(peopleById.values()).filter((p) => !placedPersonIds.has(p.id))
+  if (unplaced.length) {
+    const maxX = Math.max(0, ...Array.from(peopleById.values()).map((p) => (typeof p.x === 'number' ? p.x : 0)))
+    const rackX = snap(maxX + OUTER_GAP + 220)
+    // 레벨별로 위에서 아래로
+    unplaced.sort((a, b) => (a.level - b.level) || String(a.name ?? '').localeCompare(String(b.name ?? '')))
+    unplaced.forEach((p, idx) => {
+      p.x = rackX + (idx % 2) * (CONFIG.NODE_SIZE + 24)
+      p.y = (displayLevel.get(p.level) ?? 0) * CONFIG.Y_SPACING + Math.floor(idx / 2) * (CONFIG.NODE_SIZE + 42)
+    })
+  }
+
+  // 최종 bounds
+  let minX = Infinity
+  let maxX = -Infinity
+  let minY = Infinity
+  let maxY = -Infinity
+  for (const n of Object.values(nodeMap)) {
+    if (typeof n.x !== 'number' || typeof n.y !== 'number') continue
+    minX = Math.min(minX, n.x)
+    maxX = Math.max(maxX, n.x)
+    minY = Math.min(minY, n.y)
+    maxY = Math.max(maxY, n.y)
+  }
+  if (minX === Infinity) {
+    minX = 0
+    maxX = 800
+    minY = 0
+    maxY = 600
+  }
+  const PAD_X = 110
+  const PAD_Y = 90
+  return {
+    layoutNodes: nodeMap,
+    bounds: { x: minX - PAD_X, y: minY - PAD_Y, w: (maxX - minX) + PAD_X * 2, h: (maxY - minY) + PAD_Y * 2 },
+  }
 }
 
-const GenogramViewSimple = ({ data }) => {
+const GenogramViewSimple = ({ data, className = '' }) => {
   if (!data || !data.people) {
     return <div className="p-4 text-slate-500">가계도 데이터가 없습니다.</div>
   }
 
   const people = Array.isArray(data.people) ? data.people : []
-  const couples = Array.isArray(data.couples) ? data.couples : []
+  const couplesRaw = Array.isArray(data.couples) ? data.couples : []
   const parents = Array.isArray(data.parents) ? data.parents : []
 
-  // 1) 트리 구조 정렬 및 앵커링 엔진
-  const layoutNodes = useMemo(() => {
-    const nodeMap = {}
-    const fallbackCol = buildFallbackColByLevel(people)
-
-    // normalize
-    for (const p of people) {
-      const lvRaw = typeof p?.level === 'number' ? p.level : Number(p?.level ?? 0)
-      const level = Number.isFinite(lvRaw) ? lvRaw : 0
-      const colRaw = typeof p?.col === 'number' ? p.col : Number(p?.col)
-      const col = Number.isFinite(colRaw) ? colRaw : fallbackCol[p.id] ?? 0
-      nodeMap[p.id] = { ...p, level, col }
-    }
-
-    const units = []
-    const assignedIds = new Set()
-
-    // [STEP A] 부부를 하나의 묶음(Unit)으로 생성
-    for (const c of couples) {
-      const pA = nodeMap[c.a]
-      const pB = nodeMap[c.b]
-      if (!pA || !pB) continue
-
-      // AI가 분석한 col 값을 기준으로 좌/우 자연스럽게 배치 (선 교차 방지)
-      let left = pA
-      let right = pB
-      if ((left.col ?? 0) > (right.col ?? 0)) {
-        left = pB
-        right = pA
-      }
-
-      units.push({
-        type: 'couple',
-        level: pA.level,
-        ids: [pA.id, pB.id],
-        col: ((pA.col ?? 0) + (pB.col ?? 0)) / 2,
-        left,
-        right,
+  // 1) 모든 커플 성별 강제 정렬 (male=왼쪽(a), female=오른쪽(b))
+  // - 렌더링과 레이아웃이 같은 규칙을 공유하도록, data.couples를 먼저 정규화합니다.
+  const couples = useMemo(() => {
+    const byId = new Map(people.map((p) => [p?.id, p]))
+    return couplesRaw
+      .map((c) => {
+        const a = c?.a
+        const b = c?.b
+        if (!a || !b) return null
+        const pA = byId.get(a)
+        const pB = byId.get(b)
+        if (!pA || !pB) return { a, b }
+        if (pA.gender === 'female' && pB.gender === 'male') return { a: b, b: a }
+        return { a, b }
       })
-      assignedIds.add(pA.id)
-      assignedIds.add(pB.id)
-    }
+      .filter(Boolean)
+  }, [couplesRaw, people])
 
-    // [STEP B] 싱글 인원을 묶음(Unit)으로 추가
-    for (const p of people) {
-      if (assignedIds.has(p.id)) continue
-      const node = nodeMap[p.id]
-      if (!node) continue
-      units.push({
-        type: 'individual',
-        level: node.level,
-        ids: [node.id],
-        col: node.col ?? 0,
-        node,
-      })
-    }
-
-    // 세대(Level)별로 분류 (현재는 0/1/2 중심. 그 외 레벨은 원래 col 기반으로 둡니다.)
-    const unitsByLevel = {}
-    for (const u of units) {
-      const lv = typeof u.level === 'number' ? u.level : Number(u.level ?? 0)
-      const level = Number.isFinite(lv) ? lv : 0
-      if (!unitsByLevel[level]) unitsByLevel[level] = []
-      unitsByLevel[level].push(u)
-    }
-
-    const level1 = unitsByLevel[1] ?? []
-    const level0 = unitsByLevel[0] ?? []
-    const level2 = unitsByLevel[2] ?? []
-
-    // [STEP C] 중심 세대(Level 1) 배치 (충돌 방지 로직 적용)
-    level1.sort((a, b) => (a.col ?? 0) - (b.col ?? 0))
-    let currentX = CONFIG.OFFSET_X
-    level1.forEach((u) => {
-      const preferredX = (u.col ?? 0) * CONFIG.X_SPACING + CONFIG.OFFSET_X
-      const width = u.type === 'couple' ? CONFIG.SPOUSE_GAP : 0
-
-      const startX = Math.max(preferredX, currentX + width / 2)
-      u.midX = startX
-      u.y = 1 * CONFIG.Y_SPACING + CONFIG.OFFSET_Y
-
-      if (u.type === 'couple') {
-        u.left.x = startX - CONFIG.SPOUSE_GAP / 2
-        u.right.x = startX + CONFIG.SPOUSE_GAP / 2
-        u.left.y = u.right.y = u.y
-      } else {
-        u.node.x = startX
-        u.node.y = u.y
-      }
-
-      currentX = startX + width / 2 + CONFIG.MIN_GAP
-    })
-
-    // [STEP D] 부모 세대(Level 0) 배치: 자녀들의 한가운데 위치로 강제 이동 (수직 정렬)
-    level0.forEach((u) => {
-      const childIds = parents.filter((rel) => u.ids.includes(rel.parent)).map((rel) => rel.child)
-      const childNodes = childIds.map((id) => nodeMap[id]).filter((n) => n && typeof n.x === 'number')
-
-      let targetX = (u.col ?? 0) * CONFIG.X_SPACING + CONFIG.OFFSET_X
-      if (childNodes.length > 0) {
-        const minX = Math.min(...childNodes.map((n) => n.x))
-        const maxX = Math.max(...childNodes.map((n) => n.x))
-        targetX = (minX + maxX) / 2
-      }
-
-      u.midX = targetX
-      u.y = 0 * CONFIG.Y_SPACING + CONFIG.OFFSET_Y
-
-      if (u.type === 'couple') {
-        u.left.x = targetX - CONFIG.SPOUSE_GAP / 2
-        u.right.x = targetX + CONFIG.SPOUSE_GAP / 2
-        u.left.y = u.right.y = u.y
-      } else {
-        u.node.x = targetX
-        u.node.y = u.y
-      }
-    })
-
-    // [STEP E] 자녀 세대(Level 2) 배치: 부모의 한가운데 위치 아래로 강제 이동
-    level2.forEach((u) => {
-      const parentRel = parents.find((rel) => u.ids.includes(rel.child))
-      let targetX = (u.col ?? 0) * CONFIG.X_SPACING + CONFIG.OFFSET_X
-
-      if (parentRel) {
-        const parentUnit = level1.find((pU) => pU.ids.includes(parentRel.parent))
-        if (parentUnit && typeof parentUnit.midX === 'number') {
-          targetX = parentUnit.midX
-        }
-      }
-
-      u.midX = targetX
-      u.y = 2 * CONFIG.Y_SPACING + CONFIG.OFFSET_Y
-
-      if (u.type === 'couple') {
-        u.left.x = targetX - CONFIG.SPOUSE_GAP / 2
-        u.right.x = targetX + CONFIG.SPOUSE_GAP / 2
-        u.left.y = u.right.y = u.y
-      } else {
-        u.node.x = targetX
-        u.node.y = u.y
-      }
-    })
-
-    // Other levels: keep their preferred positions (col 기반) + 단순 충돌만 방지
-    for (const [levelKey, arr] of Object.entries(unitsByLevel)) {
-      const level = Number(levelKey)
-      if (level === 0 || level === 1 || level === 2) continue
-      arr.sort((a, b) => (a.col ?? 0) - (b.col ?? 0))
-      let xCursor = CONFIG.OFFSET_X
-      const y = level * CONFIG.Y_SPACING + CONFIG.OFFSET_Y
-      arr.forEach((u) => {
-        const preferredX = (u.col ?? 0) * CONFIG.X_SPACING + CONFIG.OFFSET_X
-        const width = u.type === 'couple' ? CONFIG.SPOUSE_GAP : 0
-        const startX = Math.max(preferredX, xCursor + width / 2)
-        u.midX = startX
-        u.y = y
-        if (u.type === 'couple') {
-          u.left.x = startX - CONFIG.SPOUSE_GAP / 2
-          u.right.x = startX + CONFIG.SPOUSE_GAP / 2
-          u.left.y = u.right.y = y
-        } else {
-          u.node.x = startX
-          u.node.y = y
-        }
-        xCursor = startX + width / 2 + CONFIG.MIN_GAP
-      })
-    }
-
-    return nodeMap
+  // 1. 다이나믹 세대 레이아웃 엔진 (세대 수 제한 없음)
+  const { layoutNodes, bounds } = useMemo(() => {
+    return computeCenterOutLayout({ people, couples, parents })
   }, [people, couples, parents])
 
-  // 2. 부부 연결선(가로선) 렌더링
   const renderCouples = () => {
     return couples.map((couple, idx) => {
       const p1 = layoutNodes[couple.a]
       const p2 = layoutNodes[couple.b]
       if (!p1 || !p2) return null
-
-      return (
-        <line key={`couple-${idx}`} x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y} stroke="#475569" strokeWidth="2.5" />
-      )
+      return <line key={`couple-${idx}`} x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y} stroke="#475569" strokeWidth="2.5" />
     })
   }
 
-  // 3. 부모-자식 연결 직각선 (절대 끊기지 않는 버스라인 구조)
   const renderChildLines = () => {
     return couples.map((couple, idx) => {
       const pA = layoutNodes[couple.a]
       const pB = layoutNodes[couple.b]
       if (!pA || !pB) return null
 
-      const midX = (pA.x + pB.x) / 2 // 부부 중앙 X좌표
+      // 4) 자식 연결선은 항상 "부모 커플 중앙(midX)"에서 시작
+      const parentMidX = (pA.x + pB.x) / 2
       const parentY = pA.y
-      const busY = parentY + 70 // 부모 밑으로 내려와서 꺾이는 지점
+      // 💡 가로선을 세대 간격(Y_SPACING)의 정확히 "절반" 위치에
+      // (글자와 겹치지 않고 위/아래 선 길이가 대칭으로 맞춰짐)
+      const busY = parentY + (CONFIG.Y_SPACING / 2)
 
       const childIds = [
         ...new Set(parents.filter((rel) => rel.parent === couple.a || rel.parent === couple.b).map((rel) => rel.child)),
       ].filter(Boolean)
-
       if (childIds.length === 0) return null
 
       const childrenNodes = childIds.map((id) => layoutNodes[id]).filter(Boolean)
       if (childrenNodes.length === 0) return null
 
-      const allXs = [midX, ...childrenNodes.map((c) => c.x)].filter((x) => typeof x === 'number' && Number.isFinite(x))
-      const minX = Math.min(...allXs)
-      const maxX = Math.max(...allXs)
+      const childXs = childrenNodes.map((c) => c.x)
+      const busMinX = Math.min(parentMidX, ...childXs)
+      const busMaxX = Math.max(parentMidX, ...childXs)
 
       return (
-        <g key={`child-lines-${idx}`}>
-          <line x1={midX} y1={parentY} x2={midX} y2={busY} stroke="#475569" strokeWidth="2.5" />
-          <line x1={minX} y1={busY} x2={maxX} y2={busY} stroke="#475569" strokeWidth="2.5" />
+        <g key={`child-line-${idx}`}>
+          <line x1={parentMidX} y1={parentY} x2={parentMidX} y2={busY} stroke="#475569" strokeWidth="2.5" />
+          <line x1={busMinX} y1={busY} x2={busMaxX} y2={busY} stroke="#475569" strokeWidth="2.5" />
           {childrenNodes.map((child) => (
             <line
               key={`to-child-${child.id}`}
@@ -280,14 +438,13 @@ const GenogramViewSimple = ({ data }) => {
     })
   }
 
-  // 4. 인물(도형 및 텍스트) 렌더링
   const renderNodes = () => {
     return Object.values(layoutNodes).map((person) => {
-      if (!person || typeof person.x !== 'number' || typeof person.y !== 'number') return null
-      const half = CONFIG.NODE_SIZE / 2
+      if (!person?.id || typeof person.x !== 'number' || typeof person.y !== 'number') return null
 
+      const half = CONFIG.NODE_SIZE / 2
       let shape
-      // 사회복지 표준 기호 적용
+
       if (person.gender === 'male') {
         shape = (
           <rect
@@ -297,49 +454,48 @@ const GenogramViewSimple = ({ data }) => {
             height={CONFIG.NODE_SIZE}
             fill="white"
             stroke="#0f172a"
-            strokeWidth="2.5"
+            strokeWidth="3"
           />
         )
       } else if (person.gender === 'female') {
-        shape = <circle cx={person.x} cy={person.y} r={half} fill="white" stroke="#0f172a" strokeWidth="2.5" />
+        shape = <circle cx={person.x} cy={person.y} r={half} fill="white" stroke="#0f172a" strokeWidth="3" />
       } else {
-        // 임신 중이거나 성별 미상인 경우 (삼각형)
         shape = (
           <polygon
             points={`${person.x},${person.y - half} ${person.x - half},${person.y + half} ${person.x + half},${person.y + half}`}
             fill="white"
             stroke="#0f172a"
-            strokeWidth="2.5"
+            strokeWidth="3"
           />
         )
       }
 
-      // --- 이름 자동 줄바꿈: '('가 있으면 2줄로 분리 ---
       let nameLine1 = person.name || ''
       let nameLine2 = ''
       const parenIdx = nameLine1.indexOf('(')
+
       if (parenIdx !== -1) {
         nameLine1 = String(person.name ?? '').substring(0, parenIdx)
         nameLine2 = String(person.name ?? '').substring(parenIdx)
       }
 
-      const textStartY = person.y + half + 20
-      const line2Y = textStartY + 16
-      const birthY = nameLine2 ? line2Y + 18 : textStartY + 18
+      const textStartY = person.y + half + 26
+      const line2Y = textStartY + 20
+      const birthY = nameLine2 ? line2Y + 22 : textStartY + 22
 
       return (
         <g key={person.id}>
           {shape}
-          <text x={person.x} y={textStartY} textAnchor="middle" className="text-[14px] font-bold fill-slate-900 tracking-tight">
+          <text x={person.x} y={textStartY} textAnchor="middle" className="text-[16px] font-bold fill-slate-900 tracking-tight">
             {nameLine1}
           </text>
           {nameLine2 ? (
-            <text x={person.x} y={line2Y} textAnchor="middle" className="text-[12px] font-medium fill-slate-500 tracking-tight">
+            <text x={person.x} y={line2Y} textAnchor="middle" className="text-[14px] font-medium fill-slate-500 tracking-tight">
               {nameLine2}
             </text>
           ) : null}
           {person.birthYear ? (
-            <text x={person.x} y={birthY} textAnchor="middle" className="text-[12px] fill-slate-400 font-medium">
+            <text x={person.x} y={birthY} textAnchor="middle" className="text-[13px] fill-slate-400 font-medium">
               {person.birthYear}년생
             </text>
           ) : null}
@@ -349,12 +505,21 @@ const GenogramViewSimple = ({ data }) => {
   }
 
   return (
-    <div className="w-full h-[700px] overflow-auto bg-slate-50/50 rounded-2xl border border-slate-200 shadow-sm p-8 flex justify-center">
-      <svg width="1800" height="800" className="max-w-none">
-        {/* 선을 먼저 그려서 도형 뒤로 배치 */}
+    <div
+      className={[
+        'w-full h-full min-h-[620px] overflow-hidden bg-slate-50/80 flex items-center justify-center p-4',
+        className,
+      ].join(' ')}
+    >
+      <svg
+        width="100%"
+        height="100%"
+        viewBox={`${bounds.x} ${bounds.y} ${bounds.w} ${bounds.h}`}
+        preserveAspectRatio="xMidYMid meet"
+        className="transition-all duration-300 ease-in-out"
+      >
         {renderCouples()}
         {renderChildLines()}
-        {/* 인물 도형 렌더링 */}
         {renderNodes()}
       </svg>
     </div>
