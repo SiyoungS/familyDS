@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
 import GenogramViewSimple from './GenogramViewSimple.jsx'
-
 const EVENT_NAME = 'genogram:render'
 
 const normalizeData = (payload) => {

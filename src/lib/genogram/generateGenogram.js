@@ -1,5 +1,8 @@
 // NOTE: 레이아웃 엔진은 "추출 전용" 모드에서는 사용하지 않습니다.
 
+
+import { repairGenogramJson } from './repairGenogramJson.js'
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 const extractBirthYear = (text) => {
@@ -772,12 +775,14 @@ const generateWithOpenAI = async ({ prompt, activeTab, counselorName }) => {
       throw new Error(text || `AI API error (${res.status})`)
     }
 
-    const json = await res.json()
+    let json = await res.json()
 
     // 최소 정규화
     if (!Array.isArray(json.people)) json.people = []
     if (!Array.isArray(json.couples)) json.couples = []
     if (!Array.isArray(json.parents)) json.parents = []
+
+    json = repairGenogramJson(json)
 
     // LLM 출력은 col/row/level이 문자열인 경우가 많다.
     // 렌더러는 number가 아니면 fallback(이름순) 배치로 돌아가므로 여기서 숫자 강제 변환.
